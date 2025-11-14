@@ -954,7 +954,7 @@ def config():
 
 
 @config.command()
-@click.argument("tool", type=click.Choice(["meltano"], case_sensitive=False))
+@click.argument("tool", type=click.Choice(["meltano", "canonizer", "vector-projector"], case_sensitive=False))
 @click.option(
     "--config",
     type=click.Path(exists=True, path_type=Path),
@@ -971,6 +971,8 @@ def show(tool, config):
         from datetime import datetime
         import yaml
         from lorch.tools.meltano import MeltanoAdapter
+        from lorch.tools.canonizer import CanonizerAdapter
+        from lorch.tools.vector_projector import VectorProjectorAdapter
 
         # Load pipeline configuration
         pipeline_config = load_config(config) if config else load_config()
@@ -1036,6 +1038,73 @@ def show(tool, config):
                     tasks = job.get("tasks", [])
                     print(f"  {job_name}: {len(tasks)} tasks")
 
+        elif tool == "canonizer":
+            # Get canonizer config
+            canonize_config = pipeline_config.get_stage("canonize")
+            if not canonize_config:
+                print_error("Canonize stage not configured")
+                exit(1)
+
+            # Create adapter
+            adapter = CanonizerAdapter(
+                canonizer_dir=canonize_config.repo_path,
+                transform_registry=Path(canonize_config.get("transform_registry")),
+                config_cache=Path("config/tools/canonizer.yaml"),
+            )
+
+            # Check if config is synced
+            if not adapter.config or not adapter.config.get("transforms"):
+                print_warning("Config cache is empty. Run 'lorch config sync canonizer' first.")
+                exit(1)
+
+            # Display config
+            print_banner(f"Canonizer Configuration (cached)")
+            print_info(f"Cache: {adapter.config_path}\n")
+
+            transforms = adapter.config.get("transforms", {})
+            transform_registry = adapter.config.get("transform_registry")
+
+            print(f"Transform Registry: {transform_registry}")
+            print(f"Transforms Discovered: {len(transforms)}\n")
+
+            # Show transforms grouped by category
+            print("=" * 60)
+            print("TRANSFORMS")
+            print("=" * 60 + "\n")
+
+            for name in sorted(transforms.keys()):
+                transform = transforms[name]
+                print(f"  {name}")
+                print(f"    Input:  {transform.get('input_schema', 'unknown')}")
+                print(f"    Output: {transform.get('output_schema', 'unknown')}")
+                print(f"    Version: {transform.get('version', 'unknown')}")
+                print()
+
+        elif tool == "vector-projector":
+            # Get vector-projector config
+            index_config = pipeline_config.get_stage("index")
+            if not index_config:
+                print_error("Index stage not configured")
+                exit(1)
+
+            # Create adapter
+            adapter = VectorProjectorAdapter(
+                vector_store_dir=index_config.output_dir,
+                config_cache=Path("config/tools/vector_projector.yaml"),
+            )
+
+            # Display config (stub)
+            print_banner(f"Vector-Projector Configuration (stub)")
+            print_info(f"Cache: {adapter.config_path}\n")
+
+            print_warning("Vector-projector is in stub mode (file copying only)")
+            print(f"Status: {adapter.config.get('status', 'not_implemented')}")
+            print(f"Vector Store: {adapter.config.get('vector_store_dir')}")
+            print("\nFuture features:")
+            print("  - SQLite indexing")
+            print("  - Inode-style storage")
+            print("  - Query API")
+
         exit(0)
 
     except Exception as e:
@@ -1046,7 +1115,7 @@ def show(tool, config):
 
 
 @config.command()
-@click.argument("tool", type=click.Choice(["meltano"], case_sensitive=False))
+@click.argument("tool", type=click.Choice(["meltano", "canonizer", "vector-projector"], case_sensitive=False))
 @click.option(
     "--config",
     type=click.Path(exists=True, path_type=Path),
@@ -1061,7 +1130,10 @@ def sync(tool, config):
     """
     try:
         from datetime import datetime
+        import yaml
         from lorch.tools.meltano import MeltanoAdapter
+        from lorch.tools.canonizer import CanonizerAdapter
+        from lorch.tools.vector_projector import VectorProjectorAdapter
 
         # Load pipeline configuration
         pipeline_config = load_config(config) if config else load_config()
@@ -1105,6 +1177,58 @@ def sync(tool, config):
 
             print_success(f"✓ Synced {len(extractors)} extractors, {len(loaders)} loaders, {len(jobs)} jobs")
             print_info(f"Cache saved to: {adapter.config_path}")
+
+        elif tool == "canonizer":
+            # Get canonizer config
+            canonize_config = pipeline_config.get_stage("canonize")
+            if not canonize_config:
+                print_error("Canonize stage not configured")
+                exit(1)
+
+            print_info(f"Syncing canonizer configuration...")
+            print_info(f"Source: {canonize_config.get('transform_registry')}")
+            print_info(f"Cache: config/tools/canonizer.yaml\n")
+
+            # Create adapter
+            adapter = CanonizerAdapter(
+                canonizer_dir=canonize_config.repo_path,
+                transform_registry=Path(canonize_config.get("transform_registry")),
+                config_cache=Path("config/tools/canonizer.yaml"),
+            )
+
+            # Sync config (discovers transforms from registry)
+            adapter.sync_config()
+
+            # Reload to get counts
+            adapter.config = adapter.load_config()
+
+            transforms = adapter.config.get("transforms", {})
+            discovered_count = adapter.config.get("discovered_count", 0)
+
+            print_success(f"✓ Discovered {discovered_count} transforms")
+            print_info(f"Cache saved to: {adapter.config_path}")
+
+        elif tool == "vector-projector":
+            # Get vector-projector config
+            index_config = pipeline_config.get_stage("index")
+            if not index_config:
+                print_error("Index stage not configured")
+                exit(1)
+
+            print_info(f"Syncing vector-projector configuration...")
+            print_warning("Vector-projector is in stub mode - no configuration to sync")
+            print_info(f"Cache: config/tools/vector_projector.yaml\n")
+
+            # Create adapter
+            adapter = VectorProjectorAdapter(
+                vector_store_dir=index_config.output_dir,
+                config_cache=Path("config/tools/vector_projector.yaml"),
+            )
+
+            # Sync config (no-op for stub)
+            adapter.sync_config()
+
+            print_info("✓ Stub mode - no sync needed")
 
         exit(0)
 
@@ -1152,18 +1276,23 @@ def list():
             },
             {
                 "name": "canonizer",
-                "description": "Data canonization tool",
-                "status": "planned",
+                "description": "Data canonization with JSONata transforms",
+                "status": "implemented",
             },
             {
                 "name": "vector-projector",
-                "description": "Vector embedding and indexing",
-                "status": "planned",
+                "description": "Vector store indexing (stub mode)",
+                "status": "stub",
             },
         ]
 
         for adapter in adapters:
-            status_symbol = "✓" if adapter["status"] == "implemented" else "○"
+            if adapter["status"] == "implemented":
+                status_symbol = "✓"
+            elif adapter["status"] == "stub":
+                status_symbol = "◐"
+            else:
+                status_symbol = "○"
             status_text = adapter["status"].upper()
 
             print(f"\n{status_symbol} {adapter['name']}")
@@ -1180,7 +1309,7 @@ def list():
 
 
 @tools.command()
-@click.argument("tool", type=click.Choice(["meltano"], case_sensitive=False))
+@click.argument("tool", type=click.Choice(["meltano", "canonizer", "vector-projector"], case_sensitive=False))
 @click.option(
     "--config",
     type=click.Path(exists=True, path_type=Path),
@@ -1211,6 +1340,8 @@ def validate(tool, config, tap, target):
     """
     try:
         from lorch.tools.meltano import MeltanoAdapter
+        from lorch.tools.canonizer import CanonizerAdapter
+        from lorch.tools.vector_projector import VectorProjectorAdapter
 
         # Load pipeline configuration
         pipeline_config = load_config(config) if config else load_config()
@@ -1269,6 +1400,61 @@ def validate(tool, config, tap, target):
             elif tap or target:
                 print_error("Both --tap and --target must be specified together")
                 exit(1)
+
+        elif tool == "canonizer":
+            # Get canonizer config
+            canonize_config = pipeline_config.get_stage("canonize")
+            if not canonize_config:
+                print_error("Canonize stage not configured")
+                exit(1)
+
+            # Create adapter
+            adapter = CanonizerAdapter(
+                canonizer_dir=canonize_config.repo_path,
+                transform_registry=Path(canonize_config.get("transform_registry")),
+                config_cache=Path("config/tools/canonizer.yaml"),
+            )
+
+            print_banner(f"Validating {tool}")
+
+            # Validation
+            validation = adapter.validate()
+
+            if validation["errors"]:
+                print_error("Validation failed:")
+                for error in validation["errors"]:
+                    print(f"  ✗ {error}")
+                exit(1)
+
+            print_success("✓ Canonizer validation passed")
+            print_info(f"  Canonizer repo: {canonize_config.repo_path}")
+            print_info(f"  Transform registry: {canonize_config.get('transform_registry')}")
+
+        elif tool == "vector-projector":
+            # Get vector-projector config
+            index_config = pipeline_config.get_stage("index")
+            if not index_config:
+                print_error("Index stage not configured")
+                exit(1)
+
+            # Create adapter
+            adapter = VectorProjectorAdapter(
+                vector_store_dir=index_config.output_dir,
+                config_cache=Path("config/tools/vector_projector.yaml"),
+            )
+
+            print_banner(f"Validating {tool}")
+
+            # Validation (stub - always valid)
+            validation = adapter.validate()
+
+            print_warning("Vector-projector is in stub mode (file copying only)")
+            print_success("✓ Stub validation passed")
+            print_info(f"  Vector store: {index_config.output_dir}")
+            print_info("\nFuture validation will check:")
+            print("  - SQLite database")
+            print("  - Inode storage directory structure")
+            print("  - Query API availability")
 
         exit(0)
 

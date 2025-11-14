@@ -1,55 +1,59 @@
 """
 Index stage: Store canonical data in local document store.
 
-STUB IMPLEMENTATION: Currently just copies files to destination.
-Future: Will call vector-projector to index in SQLite + inode storage.
+Uses VectorProjectorAdapter (stub) to index canonical data.
+Future: Will use full vector-projector with SQLite + inode storage.
 """
 
-import shutil
-from datetime import datetime
 from pathlib import Path
-from typing import List
 
 from lorch.config import StageConfig
 from lorch.stages.base import Stage, StageResult
-from lorch.utils import count_jsonl_records
+from lorch.tools.vector_projector import VectorProjectorAdapter
 
 
 class IndexStage(Stage):
     """
-    Index stage using vector-projector (stub).
+    Index stage using VectorProjectorAdapter (stub).
 
-    Current: Copies canonical JSON files to destination directory.
-    Future: Will index in SQLite with inode-style file storage.
+    Delegates indexing operations to VectorProjectorAdapter.
+    Current: Adapter stub copies files.
+    Future: Adapter will use SQLite + inode storage when vector-projector is ready.
     """
 
+    def __init__(self, config: StageConfig, logger):
+        """Initialize stage with VectorProjectorAdapter stub."""
+        super().__init__(config, logger)
+
+        # Initialize VectorProjectorAdapter (stub)
+        vector_store_dir = self.config.output_dir
+
+        self.adapter = VectorProjectorAdapter(
+            vector_store_dir=vector_store_dir,
+        )
+
     def validate(self) -> None:
-        """Validate index stage prerequisites."""
+        """Validate index stage prerequisites via adapter."""
+        # Validate using adapter
+        validation = self.adapter.validate()
+
+        if not validation["valid"]:
+            errors = "\n".join(validation["errors"])
+            raise ValueError(f"Vector-projector validation failed:\n{errors}")
+
         # Validate output directory
         self._validate_output_dir()
-
-        # Check mode
-        mode = self.config.get("mode", "stub")
-        if mode != "stub":
-            self.logger.warning(
-                f"Index mode '{mode}' not supported yet, using 'stub'",
-                extra={
-                    "stage": self.name,
-                    "event": "unsupported_mode",
-                    "metadata": {"mode": mode},
-                },
-            )
 
         # Note: We don't validate input files here since they may not exist yet
         # (they're created by the canonize stage)
 
     def execute(self) -> StageResult:
-        """Execute index stub (copy files)."""
+        """Execute index stage via adapter (stub mode - copies files)."""
         input_dir = self.config.input_dir
         output_dir = self.config.output_dir
 
         self.logger.info(
-            "Starting index stage (stub mode - copying files)",
+            "Starting index stage (stub mode - copying files via adapter)",
             extra={
                 "stage": self.name,
                 "event": "index_started",
@@ -57,12 +61,19 @@ class IndexStage(Stage):
             },
         )
 
-        # Get input files
-        input_files = list(input_dir.glob("*.jsonl"))
+        # Use adapter to copy files (stub implementation)
+        result = self.adapter.copy_files(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            logger=self.logger,
+        )
 
-        if not input_files:
+        files_copied = result["files_copied"]
+        records_processed = result["records_processed"]
+
+        if files_copied == 0:
             self.logger.warning(
-                "No input files found for indexing",
+                "No files found for indexing",
                 extra={
                     "stage": self.name,
                     "event": "no_input_files",
@@ -76,113 +87,31 @@ class IndexStage(Stage):
                 metadata={"mode": "stub", "files_processed": 0},
             )
 
-        # Copy each file to output directory
-        total_records = 0
-        output_files = []
-
-        for input_file in input_files:
-            try:
-                # Generate output filename with timestamp
-                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                output_file = output_dir / f"{input_file.stem}-{timestamp}{input_file.suffix}"
-
-                # Copy file
-                shutil.copy2(input_file, output_file)
-                output_files.append(output_file)
-
-                # Count records
-                records = count_jsonl_records(output_file)
-                total_records += records
-
-                self.logger.info(
-                    f"Indexed {records} records from {input_file.name}",
-                    extra={
-                        "stage": self.name,
-                        "event": "file_indexed",
-                        "metadata": {
-                            "input_file": str(input_file),
-                            "output_file": str(output_file),
-                            "records": records,
-                        },
-                    },
-                )
-
-            except Exception as e:
-                self.logger.error(
-                    f"Failed to index {input_file.name}: {e}",
-                    extra={
-                        "stage": self.name,
-                        "event": "index_error",
-                        "metadata": {"input_file": str(input_file), "error": str(e)},
-                    },
-                )
-
-        # Create manifest file
-        manifest_file = output_dir / "manifest.json"
-        self._create_manifest(manifest_file, output_files, total_records)
-
         self.logger.info(
-            f"Index stage completed: {len(output_files)} files, {total_records} records",
+            f"Index stage completed: {files_copied} files, {records_processed} records",
             extra={
                 "stage": self.name,
                 "event": "index_completed",
                 "metadata": {
-                    "files": len(output_files),
-                    "records": total_records,
+                    "files": files_copied,
+                    "records": records_processed,
                 },
             },
         )
+
+        # Convert output file paths to Path objects
+        output_files = [Path(f) for f in result["output_files"]]
 
         return StageResult(
             stage_name=self.name,
             success=True,
             duration_seconds=0,  # Will be set by base class
-            records_processed=total_records,
+            records_processed=records_processed,
             output_files=output_files,
             metadata={
                 "mode": "stub",
-                "files_processed": len(output_files),
-                "manifest": str(manifest_file),
-            },
-        )
-
-    def _create_manifest(
-        self, manifest_file: Path, output_files: List[Path], total_records: int
-    ) -> None:
-        """
-        Create manifest file with indexing metadata.
-
-        Args:
-            manifest_file: Path to manifest file
-            output_files: List of indexed files
-            total_records: Total record count
-        """
-        import json
-
-        manifest = {
-            "created_at": datetime.utcnow().isoformat() + "Z",
-            "stage": self.name,
-            "mode": "stub",
-            "total_records": total_records,
-            "files": [
-                {
-                    "path": str(f.relative_to(self.config.output_dir)),
-                    "size_bytes": f.stat().st_size,
-                    "records": count_jsonl_records(f),
-                }
-                for f in output_files
-            ],
-        }
-
-        with open(manifest_file, "w") as f:
-            json.dump(manifest, f, indent=2)
-
-        self.logger.debug(
-            f"Created manifest: {manifest_file}",
-            extra={
-                "stage": self.name,
-                "event": "manifest_created",
-                "metadata": {"manifest": str(manifest_file)},
+                "files_processed": files_copied,
+                "manifest": result["manifest_file"],
             },
         )
 
