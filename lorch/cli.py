@@ -334,26 +334,64 @@ def clean(stage, clean_all, dry_run, config):
     help="Target to use (auto-selects chunked target if not specified)",
 )
 @click.option(
+    "-q",
+    "--query",
+    default=None,
+    help="Custom query string (provider-specific syntax, overrides time flags)",
+)
+@click.option(
+    "--since",
+    default=None,
+    help="Extract since date (YYYY-MM-DD or relative like '7d', '2w', '1m')",
+)
+@click.option(
+    "--from",
+    "from_date",
+    default=None,
+    help="Extract from date (YYYY-MM-DD or relative)",
+)
+@click.option(
+    "--to",
+    "to_date",
+    default=None,
+    help="Extract to date (YYYY-MM-DD or relative)",
+)
+@click.option(
+    "--last",
+    default=None,
+    help="Extract last N days/weeks/months (e.g., '7d', '2w', '1m')",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Enable verbose output",
 )
-def extract(tap_name, config, target, verbose):
+def extract(tap_name, config, target, query, since, from_date, to_date, last, verbose):
     """
     Run a single meltano extractor with target-jsonl-chunked.
 
     Automatically selects the appropriate chunked target based on tap name.
+    Supports time-based filtering with convenient flags.
 
     Examples:
 
       # Extract from single Gmail account (auto-selects chunked target)
       lorch extract tap-gmail--acct1-personal
 
-      # Extract from Exchange account
-      lorch extract tap-msgraph-mail--ben-mensio
+      # Extract last 7 days from Gmail
+      lorch extract tap-gmail--acct1-personal --last 7d
 
-      # Extract from Dataverse
-      lorch extract tap-dataverse
+      # Extract since specific date
+      lorch extract tap-gmail--acct1-personal --since 2025-11-01
+
+      # Extract date range
+      lorch extract tap-gmail--acct1-personal --from 2025-11-01 --to 2025-11-15
+
+      # Custom query (provider-specific syntax)
+      lorch extract tap-gmail--acct1-personal -q "label:inbox after:2025/11/12"
+
+      # Extract from Exchange with time filter
+      lorch extract tap-msgraph-mail--ben-mensio --last 30d
 
       # Override target
       lorch extract tap-dataverse --target target-jsonl
@@ -362,6 +400,54 @@ def extract(tap_name, config, target, verbose):
         import subprocess
         import time
         import os
+        from lorch.utils import (
+            parse_date_string,
+            format_date_for_provider,
+            detect_provider_from_tap_name,
+        )
+
+        # Validate query flags (mutual exclusivity)
+        if last and (since or from_date or to_date):
+            print_error("Cannot use --last with --since, --from, or --to")
+            exit(1)
+
+        if since and (from_date or to_date):
+            print_error("Cannot use --since with --from or --to")
+            exit(1)
+
+        if (from_date and not to_date) or (to_date and not from_date):
+            print_error("Must specify both --from and --to together")
+            exit(1)
+
+        # Build query string
+        query_string = None
+
+        if query:
+            # Custom query takes precedence
+            query_string = query
+        elif last or since or from_date:
+            # Build query from time flags
+            provider = detect_provider_from_tap_name(tap_name)
+
+            try:
+                if last:
+                    # Parse relative date
+                    from_dt = parse_date_string(last)
+                    to_dt = None
+                    query_string = format_date_for_provider(provider, from_dt, to_dt)
+                elif since:
+                    # Parse since date
+                    from_dt = parse_date_string(since)
+                    to_dt = None
+                    query_string = format_date_for_provider(provider, from_dt, to_dt)
+                elif from_date and to_date:
+                    # Parse date range
+                    from_dt = parse_date_string(from_date)
+                    to_dt = parse_date_string(to_date)
+                    query_string = format_date_for_provider(provider, from_dt, to_dt)
+            except ValueError as e:
+                print_error(f"Invalid date format: {e}")
+                exit(1)
 
         # Load configuration
         pipeline_config = load_config(config) if config else load_config()
@@ -384,6 +470,23 @@ def extract(tap_name, config, target, verbose):
             run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
             os.environ["RUN_ID"] = run_id
 
+        # Set query environment variable if specified
+        if query_string:
+            provider = detect_provider_from_tap_name(tap_name)
+
+            if provider == "gmail":
+                # Gmail uses messages.q nested config
+                os.environ["TAP_GMAIL_MESSAGES_Q"] = query_string
+            elif provider == "exchange":
+                # Exchange/msgraph uses filter parameter
+                os.environ["TAP_MSGRAPH_MAIL_FILTER"] = query_string
+            elif provider == "dataverse":
+                # Dataverse uses filter parameter
+                os.environ["TAP_DATAVERSE_FILTER"] = query_string
+            else:
+                # Generic query parameter
+                os.environ["TAP_QUERY"] = query_string
+
         # Build command
         meltano_bin = extract_config.venv_path / "bin" / "meltano"
         command = [str(meltano_bin), "run", tap_name, target]
@@ -391,6 +494,8 @@ def extract(tap_name, config, target, verbose):
         print_banner(f"Extracting: {tap_name}")
         print_info(f"Command: meltano run {tap_name} {target}")
         print_info(f"Run ID: {run_id}")
+        if query_string:
+            print_info(f"Query: {query_string}")
         print_info(f"Working directory: {extract_config.repo_path}")
         print_info(f"Vault directory: {extract_config.output_dir}\n")
 

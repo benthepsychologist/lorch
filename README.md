@@ -4,30 +4,37 @@
 
 ## 🎯 Overview
 
-lorch orchestrates the local-first data pipeline:
+lorch orchestrates the local-first data pipeline with time-series vault storage:
 
 ```
 ┌─────────────┐      ┌────────────┐      ┌──────────────────┐
 │   meltano   │  →   │ canonizer  │  →   │ vector-projector │
 │  (extract)  │      │(transform) │      │    (index)       │
 └─────────────┘      └────────────┘      └──────────────────┘
-     JSONL         Canonical JSON        SQLite + Files
+ Chunked Vault    Canonical/Account      SQLite + Files
 ```
 
 ### Pipeline Stages
 
-1. **Extract** - Meltano pulls data from 8 sources (Gmail, Exchange, Dataverse)
-2. **Canonize** - Transforms source formats to canonical schemas via JSONata
+1. **Extract** - Pulls data from 12 sources (Gmail, Exchange, Dataverse, Sheets, QuickBooks)
+   - Writes to time-series vault with LATEST pointer
+   - Chunked, compressed, auditable
+2. **Canonize** - Transforms LATEST vault runs to canonical schemas via JSONata
+   - Deterministic: same LATEST → same output
+   - Idempotent: clears and rebuilds per account
 3. **Index** - Stores canonical data in local document store with SQLite indexing
 
 ### Key Features
 
-- ✅ **Security-First**: PHI data protection with 700 permissions
-- ✅ **Error Handling**: Retry logic with exponential backoff
+- ✅ **Vault Storage**: Time-series extraction with LATEST pointers
+- ✅ **Deterministic**: Canonization always produces same output from LATEST
+- ✅ **Idempotent**: Safe to rerun - clears and rebuilds
+- ✅ **Auditable**: Historical runs preserved for audit trail
+- ✅ **Security-First**: PHI data protection with 700/600 permissions
+- ✅ **Granular Control**: Extract individual accounts or run batch jobs
+- ✅ **Error Handling**: Retry logic, failed runs don't update LATEST
 - ✅ **Structured Logging**: JSON logs with no PHI data
-- ✅ **Validation**: Pre-flight checks before execution
 - ✅ **Cloud-Ready**: Design enables easy cloud migration
-- ✅ **Modular**: Each stage is independent and testable
 
 ## 🚀 Quick Start
 
@@ -50,10 +57,19 @@ lorch --version
 ### Basic Usage
 
 ```bash
-# Run full pipeline
-lorch run
+# List available extractors
+lorch list extractors
 
-# Run single stage
+# Extract from individual source
+lorch extract tap-gmail--acct1-personal
+
+# List available transforms
+lorch list transforms
+
+# List configured mappings
+lorch list mappings
+
+# Run canonization (processes LATEST runs only)
 lorch run --stage canonize
 
 # Validate configuration
@@ -72,13 +88,16 @@ lorch clean --stage canonize
 # 1. Validate setup
 lorch validate
 
-# 2. Dry run (validation only)
-lorch run --dry-run
+# 2. List what's available
+lorch list extractors
 
-# 3. Run canonize stage with test data
+# 3. Extract from a single source
+lorch extract tap-gmail--acct1-personal
+
+# 4. Run canonization (LATEST-only, idempotent)
 lorch run --stage canonize
 
-# 4. Check logs
+# 5. Check logs
 tail -f logs/pipeline-*.log
 ```
 
@@ -121,7 +140,112 @@ stages:
 
 See [docs/configuration.md](docs/configuration.md) for complete reference.
 
+## 🗄️ Vault Structure
+
+lorch uses a time-series vault with LATEST pointers for deterministic, idempotent processing:
+
+```
+vault/{domain}/{source}/{account}/
+├── dt=2025-11-12/run_id=20251112T205433Z/
+│   ├── manifest.json               # Run metadata, checksums
+│   ├── part-000.jsonl.gz          # Compressed data chunks
+│   └── part-001.jsonl.gz
+├── dt=2025-11-13/run_id=20251113T103045Z/  # Next day's run
+│   ├── manifest.json
+│   └── part-000.jsonl.gz
+└── LATEST.json  ← Points to most recent successful run
+```
+
+**LATEST.json** format:
+```json
+{
+  "dt": "2025-11-13",
+  "run_id": "20251113T103045Z",
+  "updated_at": "2025-11-13T10:31:05.123456+00:00",
+  "records": 295
+}
+```
+
+**Key Properties:**
+- **Time-Series**: All historical runs preserved
+- **LATEST Pointer**: Determines which run to canonize
+- **Deterministic**: Same LATEST → same canonical output
+- **Idempotent**: Rerun canonize safely, clears and rebuilds
+- **Safe**: Failed runs don't update LATEST pointer
+
+**Workflow:**
+1. `lorch extract` → creates new `dt=/run_id=` directory
+2. On success → updates `LATEST.json` to point to new run
+3. `lorch run --stage canonize` → processes LATEST run only
+4. Historical runs kept for audit, but ignored by canonize
+
 ## 📊 CLI Commands
+
+### `lorch extract`
+
+Run a single extractor (auto-selects chunked target).
+
+```bash
+lorch extract TAP_NAME [OPTIONS]
+
+Options:
+  --target TEXT     Override target (default: auto-select)
+  --config PATH     Custom configuration file
+  --verbose         Enable debug logging
+```
+
+**Examples:**
+
+```bash
+# Extract from single Gmail account
+lorch extract tap-gmail--acct1-personal
+
+# Extract from Exchange
+lorch extract tap-msgraph-mail--ben-mensio
+
+# Extract from all Gmail accounts (run 3 times)
+lorch extract tap-gmail--acct1-personal
+lorch extract tap-gmail--acct2-business1
+lorch extract tap-gmail--acct3-bfarmstrong
+
+# Override target
+lorch extract tap-dataverse --target target-jsonl
+```
+
+**Output:**
+- Creates: `vault/{domain}/{source}/{account}/dt=YYYY-MM-DD/run_id=TIMESTAMP/`
+- Updates: `LATEST.json` on success
+- Shows: Manifest summary with records, size, parts
+
+### `lorch list`
+
+Discover available extractors, transforms, jobs, and mappings.
+
+```bash
+lorch list COMMAND
+
+Commands:
+  extractors    List all configured meltano taps
+  jobs          List all configured meltano jobs
+  transforms    List available transforms
+  mappings      List source → transform mappings
+```
+
+**Examples:**
+
+```bash
+# List all extractors
+lorch list extractors
+
+# List meltano jobs
+lorch list jobs
+
+# List available transforms
+lorch list transforms
+
+# List configured mappings
+lorch list mappings
+```
 
 ### `lorch run`
 
@@ -253,23 +377,33 @@ Logs are written to `logs/pipeline-YYYY-MM-DD.log` with structured JSON format.
 
 ## 🎯 Current Status
 
-### ✅ Implemented
+### ✅ Implemented (v0.1.0)
 
-- [x] Pipeline orchestration framework
-- [x] Extract stage (Meltano integration)
-- [x] Canonize stage (canonizer integration)
-- [x] Index stage (stub - file copy)
-- [x] CLI interface (run, status, validate, clean)
-- [x] Structured logging
-- [x] Error handling with retries
-- [x] Configuration management
-- [x] PHI security validation
-- [x] Transform registry
+- [x] **Pipeline orchestration framework**
+- [x] **Vault storage**: Time-series with LATEST pointers
+- [x] **Extract stage**: Meltano integration with chunked targets
+- [x] **Granular extraction**: `lorch extract <tap>` for individual sources
+- [x] **Discovery commands**: `lorch list extractors/jobs/transforms/mappings`
+- [x] **Canonize stage**: LATEST-only, deterministic, idempotent
+- [x] **Per-account canonical output**: `canonical/{source}/{account}.jsonl`
+- [x] **Index stage**: Stub (file copy)
+- [x] **CLI interface**: run, extract, list, status, validate, clean
+- [x] **Structured logging**: JSON logs with no PHI
+- [x] **Error handling**: Retries, failed runs don't update LATEST
+- [x] **Configuration management**: YAML-based
+- [x] **PHI security validation**: 700/600 permissions enforced
+- [x] **Transform registry**: `/home/user/transforms/`
+- [x] **Manifest tracking**: Records, checksums, compression stats
 
 ### ⚠️ Partially Implemented
 
-- [ ] Transform library (only Gmail → canonical exists)
-- [ ] Vector-projector integration (stub mode)
+- [ ] **Transform library**: Only 1/4 exist
+  - ✅ Gmail → canonical email
+  - ❌ Exchange → canonical email
+  - ❌ Dataverse contact → canonical contact
+  - ❌ Dataverse session → canonical clinical_session
+- [ ] **Vector-projector integration**: Stub mode (just copies files)
+- [ ] **Tests**: No unit or integration tests yet
 
 ### 🚧 TODO
 
@@ -277,20 +411,25 @@ See [NEXT_STEPS.md](NEXT_STEPS.md) for complete roadmap.
 
 **Immediate next steps:**
 
-1. Create missing transforms:
+1. **Create missing transforms** (3 remaining):
    - Exchange → canonical email
    - Dataverse contact → canonical contact
    - Dataverse session → canonical clinical_session
 
-2. Implement full vector-projector:
-   - SQLite indexing
+2. **Implement full vector-projector**:
+   - SQLite indexing by message_id/entity_id
    - Inode-style file storage
    - Query API
 
-3. Add monitoring:
-   - Metrics collection
+3. **Add tests**:
+   - Unit tests for stages
+   - Integration tests for full pipeline
+   - Vault LATEST pointer logic tests
+
+4. **Add monitoring**:
+   - Metrics collection (records/run, duration, errors)
    - Alerting on failures
-   - Dashboard
+   - Dashboard (optional)
 
 ## 🛠️ Development
 

@@ -320,3 +320,180 @@ def print_warning(message: str) -> None:
 def print_info(message: str) -> None:
     """Print info message to console."""
     console.print(f"[bold cyan]ℹ[/bold cyan] {message}")
+
+
+def parse_relative_date(relative: str) -> datetime:
+    """
+    Parse relative date string to absolute datetime.
+
+    Args:
+        relative: Relative date string like "7d", "2w", "1m", "3y"
+                  - d = days
+                  - w = weeks
+                  - m = months (30 days)
+                  - y = years (365 days)
+
+    Returns:
+        datetime object representing the date
+
+    Raises:
+        ValueError: If format is invalid
+
+    Examples:
+        >>> parse_relative_date("7d")  # 7 days ago
+        >>> parse_relative_date("2w")  # 2 weeks ago
+        >>> parse_relative_date("1m")  # 1 month (30 days) ago
+    """
+    from datetime import timedelta
+    import re
+
+    match = re.match(r"^(\d+)([dwmy])$", relative.lower())
+    if not match:
+        raise ValueError(
+            f"Invalid relative date format: '{relative}'. "
+            "Expected format: <number><unit> (e.g., '7d', '2w', '1m', '3y')"
+        )
+
+    value = int(match.group(1))
+    unit = match.group(2)
+
+    now = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if unit == "d":
+        return now - timedelta(days=value)
+    elif unit == "w":
+        return now - timedelta(weeks=value)
+    elif unit == "m":
+        return now - timedelta(days=value * 30)  # Approximate month
+    elif unit == "y":
+        return now - timedelta(days=value * 365)  # Approximate year
+    else:
+        raise ValueError(f"Unknown unit: {unit}")
+
+
+def parse_date_string(date_str: str) -> datetime:
+    """
+    Parse date string to datetime.
+
+    Accepts:
+    - Absolute dates: "2025-11-01", "2025/11/01"
+    - Relative dates: "7d", "2w", "1m"
+
+    Args:
+        date_str: Date string
+
+    Returns:
+        datetime object
+
+    Raises:
+        ValueError: If format is invalid
+    """
+    import re
+
+    # Check if it's a relative date
+    if re.match(r"^\d+[dwmy]$", date_str.lower()):
+        return parse_relative_date(date_str)
+
+    # Try parsing absolute date formats
+    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"]:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+
+    raise ValueError(
+        f"Invalid date format: '{date_str}'. "
+        "Expected: YYYY-MM-DD, YYYY/MM/DD, or relative (e.g., '7d')"
+    )
+
+
+def format_date_for_provider(
+    provider: str,
+    from_dt: Optional[datetime] = None,
+    to_dt: Optional[datetime] = None,
+) -> str:
+    """
+    Format date range as query string for different providers.
+
+    Args:
+        provider: Provider type ("gmail", "exchange", "dataverse")
+        from_dt: Start date (inclusive)
+        to_dt: End date (inclusive)
+
+    Returns:
+        Provider-specific query string
+
+    Examples:
+        Gmail:
+            - after:2025/11/01
+            - after:2025/11/01 before:2025/11/15
+
+        Exchange:
+            - receivedDateTime ge 2025-11-01T00:00:00Z
+            - receivedDateTime ge 2025-11-01T00:00:00Z and receivedDateTime le 2025-11-15T23:59:59Z
+
+        Dataverse:
+            - modifiedon ge 2025-11-01
+            - modifiedon ge 2025-11-01 and modifiedon le 2025-11-15
+    """
+    if not from_dt and not to_dt:
+        return ""
+
+    provider = provider.lower()
+
+    if provider == "gmail":
+        parts = []
+        if from_dt:
+            parts.append(f"after:{from_dt.strftime('%Y/%m/%d')}")
+        if to_dt:
+            parts.append(f"before:{to_dt.strftime('%Y/%m/%d')}")
+        return " ".join(parts)
+
+    elif provider == "exchange" or provider == "msgraph":
+        parts = []
+        if from_dt:
+            parts.append(f"receivedDateTime ge {from_dt.strftime('%Y-%m-%dT00:00:00Z')}")
+        if to_dt:
+            # End of day
+            to_dt_end = to_dt.replace(hour=23, minute=59, second=59)
+            parts.append(f"receivedDateTime le {to_dt_end.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+        return " and ".join(parts)
+
+    elif provider == "dataverse":
+        parts = []
+        if from_dt:
+            parts.append(f"modifiedon ge {from_dt.strftime('%Y-%m-%d')}")
+        if to_dt:
+            parts.append(f"modifiedon le {to_dt.strftime('%Y-%m-%d')}")
+        return " and ".join(parts)
+
+    else:
+        # Generic format (ISO date)
+        parts = []
+        if from_dt:
+            parts.append(f"from:{from_dt.strftime('%Y-%m-%d')}")
+        if to_dt:
+            parts.append(f"to:{to_dt.strftime('%Y-%m-%d')}")
+        return " ".join(parts)
+
+
+def detect_provider_from_tap_name(tap_name: str) -> str:
+    """
+    Detect provider type from tap name.
+
+    Args:
+        tap_name: Tap name (e.g., "tap-gmail--acct1-personal", "tap-msgraph-mail--ben-mensio")
+
+    Returns:
+        Provider name ("gmail", "exchange", "dataverse", "unknown")
+    """
+    tap_lower = tap_name.lower()
+
+    if "gmail" in tap_lower:
+        return "gmail"
+    elif "msgraph" in tap_lower or "exchange" in tap_lower:
+        return "exchange"
+    elif "dataverse" in tap_lower:
+        return "dataverse"
+    else:
+        return "unknown"

@@ -1,0 +1,255 @@
+aip_id: AIP-lorch-2025-11-13-001
+context:
+  background: '**Problem:** Lorch currently calls meltano directly without validation, leading to bugs
+    like:
+
+    1. Query filter (`messages.q: after:2025/11/12`) ignored because `message_list` stream was excluded
+
+    2. Extracting full base64-encoded images/attachments (131MB for what should be 5MB)
+
+    3. Wrong target name selected by auto-selector
+
+    4. No validation before running expensive extractions
+
+
+    **Current Architecture Issues:**
+
+    - No separation between orchestration (lorch) and execution (meltano)
+
+    - Config lives only in meltano.yml (lorch can''t validate without running meltano)
+
+    - Testing logic scattered across stages
+
+    - Hard to add new tools (canonizer, vector-projector, GCS) without duplicating patterns
+
+
+    **Why Tool Adapters Over Plugin Registry:**
+
+
+    Initially considered a plugin registry system with `config/registry/`, `plugins/extractors/`, etc.
+
+    **Rejected because:**
+
+    - Too complex for 3-4 tools (meltano, canonizer, vector-projector)
+
+    - Future tools (GCS buckets, event pipelines) don''t fit "plugin" model
+
+    - Over-abstraction: treating everything as extractors/loaders is wrong
+
+    - Premature generalization
+
+
+    **Tool Adapter Pattern is better because:**
+
+    - Simpler: Just wrapper classes, no registry abstraction
+
+    - Flexible: Each tool can have completely different API (CLI, library, cloud API, streaming)
+
+    - Right abstraction: "Tools" = anything lorch orchestrates
+
+    - Solves actual problems: validation, testing, config sync
+
+    - Grows naturally: Add adapters as needed for new tools'
+  constraints:
+  - No edits to meltano-ingest repository (only read meltano.yml) - document required changes instead
+  - 'Config sync is one-way: meltano.yml → lorch cache (for now)'
+  - 'Keep it simple: Start with meltano adapter only'
+  - No breaking changes to existing `lorch extract` command
+created: '2025-11-13T12:28:01.751123+00:00'
+meta:
+  created_at: '2025-11-13T12:28:01.751123+00:00'
+  created_by: benthepsychologist
+objective:
+  acceptance_criteria:
+  - Tool adapter pattern documented and implemented
+  - '`lorch config show meltano` command displays meltano configuration'
+  - '`lorch config sync meltano` syncs from meltano.yml to lorch cache'
+  - '`lorch tools validate meltano` validates tap-target pairs before execution'
+  - Gmail extraction works correctly (1-day filter, text-only, ~1-5MB files)
+  - Extract stage uses meltano adapter with validation
+  - No protected paths modified
+  - All tests pass
+  goal: Implement tool adapter pattern for lorch orchestration and fix Gmail extraction issues
+orchestrator_contract:
+  artifacts_dir: .aip_artifacts/AIP-lorch-2025-11-13-001
+  logging: jsonl
+  state_machine:
+    events:
+    - run_step
+    - await_gate
+    - approve
+    - reject
+    - retry
+    - escalate
+    - complete
+    states:
+    - pending
+    - running
+    - awaiting_human
+    - failed
+    - succeeded
+    - rolled_back
+plan:
+- description: Create Tool Adapter Base Class
+  gate_ref: 'G0: Design Approval'
+  kind: code
+  outputs:
+  - lorch/tools/__init__.py
+  - lorch/tools/base.py
+  prompt: 'Create the base tool adapter interface in `lorch/tools/base.py`.
+
+    Implement:
+
+    - `ToolAdapter` abstract base class
+
+    - Methods: `load_config()`, `sync_config()`, `validate()`, `execute()`
+
+    - Type hints and docstrings
+
+    - Simple error handling'
+  role: coding_agent
+  step_id: step-001
+- description: Implement Meltano Adapter
+  gate_ref: 'G0: Design Approval'
+  kind: code
+  outputs:
+  - lorch/tools/meltano.py
+  - config/tools/
+  prompt: 'Create `lorch/tools/meltano.py` with `MeltanoAdapter` class.
+
+    Implement:
+
+    1. `sync_config()` - Parse meltano.yml, extract extractors/loaders/jobs, write to config/tools/meltano.yaml
+
+    2. `validate_task(tap, target)` - Check tap/target exist, validate Gmail-specific rules
+
+    3. `run_task(tap, target)` - Execute meltano run with validation
+
+    4. `load_config()` - Load from config/tools/meltano.yaml'
+  role: coding_agent
+  step_id: step-002
+- description: Add CLI Commands
+  gate_ref: 'G1: Code Readiness'
+  kind: code
+  outputs:
+  - lorch/cli.py
+  prompt: 'Update `lorch/cli.py` to add new commands:
+
+    - `lorch config show <tool>` - Display tool configuration
+
+    - `lorch config sync <tool>` - Sync tool config from source
+
+    - `lorch tools list` - List available adapters
+
+    - `lorch tools validate <tool>` - Validate tool configuration
+
+    Commands should:
+
+    - Use click decorators
+
+    - Handle errors gracefully
+
+    - Provide clear output'
+  role: coding_agent
+  step_id: step-003
+- description: Document Required Gmail Config Changes
+  gate_ref: 'G1: Code Readiness'
+  kind: code
+  outputs:
+  - docs/gmail-config-fixes.md
+  prompt: "Document the required changes to tap-gmail--acct1-personal configuration.\nCreate `docs/gmail-config-fixes.md`\
+    \ documenting what needs to be changed in `/home/user/meltano-ingest/meltano.yml`:\n1. Re-enable message_list\
+    \ stream (remove `!message_list.*.*` exclusion)\n2. Add `!messages.raw` exclusion to reduce base64\
+    \ bloat\n3. Verify `messages.q: after:2025/11/12` is set\nInclude example YAML showing the updated\
+    \ select configuration:\n```yaml\nselect:\n  - message_list.*.*     # Needed for query filtering\n\
+    \  - messages.*.*         # Message content\n  - '!messages.raw'      # Exclude base64-encoded full\
+    \ email\n```"
+  role: coding_agent
+  step_id: step-004
+- description: Fix Lorch Target Auto-Selector
+  gate_ref: 'G1: Code Readiness'
+  kind: code
+  outputs:
+  - lorch/cli.py
+  prompt: 'Fix `_select_chunked_target()` function in `/home/user/lorch/lorch/cli.py` (lines ~434-475).
+
+    Update target name mappings:
+
+    - Line ~438: `target-jsonl-chunked--acct1-ben-mensio` → `target-jsonl-chunked--gmail-ben-mensio`
+
+    - Line ~442: `target-jsonl-chunked--acct2-ben-mensio` → `target-jsonl-chunked--gmail-drben`
+
+    - Line ~446: `target-jsonl-chunked--acct3-ben-mensio` → `target-jsonl-chunked--gmail-ben-personal`'
+  role: coding_agent
+  step_id: step-005
+- description: Update Extract Stage to Use Adapter
+  gate_ref: 'G1: Code Readiness'
+  kind: code
+  outputs:
+  - lorch/stages/extract.py
+  prompt: 'Update `lorch/stages/extract.py` to use MeltanoAdapter:
+
+    1. Import MeltanoAdapter
+
+    2. Before running extraction, validate task with adapter
+
+    3. Use adapter.run_task() instead of direct subprocess call
+
+    4. Log validation results'
+  role: coding_agent
+  step_id: step-006
+- description: Test Gmail Extraction
+  gate_ref: 'G2: Pre-Release'
+  kind: code
+  prompt: "Test the fixed Gmail extraction:\n1. Clean up failed extraction: `rm -rf /home/user/phi-data/vault/email/gmail/ben-personal/dt=2025-11-13/`\n\
+    2. Run sync: `lorch config sync meltano`\n3. Validate: `lorch tools validate meltano`\n4. Run extraction:\
+    \ `lorch extract tap-gmail--acct1-personal`\n5. Verify results:\n   - Small file size (~1-5MB for\
+    \ 1 day)\n   - Fast completion (1-2 minutes)\n   - Correct date range (only after 2025/11/12)\n  \
+    \ - No base64 bloat"
+  role: coding_agent
+  step_id: step-007
+- description: Documentation
+  gate_ref: 'G3: Post-Implementation'
+  kind: code
+  outputs:
+  - README.md
+  - docs/tool-adapters.md
+  prompt: 'Update documentation:
+
+    1. Add "Tool Adapter Pattern" section to README.md
+
+    2. Document new commands in CLI help
+
+    3. Add example adapter usage
+
+    4. Document how to add new tool adapters'
+  role: coding_agent
+  step_id: step-008
+- description: Decision Log
+  gate_ref: 'G4: Final Approval'
+  kind: code
+  outputs:
+  - artifacts/governance/decision-log.md
+  prompt: 'Document architectural decision:
+
+    - Why tool adapters over plugin registry
+
+    - Tradeoffs considered
+
+    - Future extensibility plan'
+  role: coding_agent
+  step_id: step-009
+project_slug: lorch
+repo:
+  default_branch: main
+  url: git@github.com:benthepsychologist/lorch.git
+  working_branch: feat/tool-adapter-pattern
+spec_version: 1.0.0
+tier: C
+title: Tool Adapter Pattern + Fix Gmail Extraction
+updated: '2025-11-14T00:00:00+00:00'
+version: '0.1'
+status: completed
+completion_date: '2025-11-13T20:30:44+00:00'
+completion_notes: 'All acceptance criteria met. Tool adapter pattern implemented and committed in 7c99d68. Gmail extraction working with validation. All steps completed successfully.'
+

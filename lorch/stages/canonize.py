@@ -2,8 +2,10 @@
 Canonize stage: Transform source data to canonical format.
 
 Uses canonizer CLI to apply JSONata transforms.
+Supports vault structure with manifests and gzip-compressed chunks.
 """
 
+import gzip
 import json
 import subprocess
 from pathlib import Path
@@ -49,8 +51,9 @@ class CanonizeStage(Stage):
                 f"Transform registry not found: {transform_registry}"
             )
 
-        # Validate input files exist
-        self._validate_input_files(patterns=["*.jsonl"])
+        # Validate vault directory exists (don't check for specific files)
+        if not self.config.input_dir.exists():
+            raise FileNotFoundError(f"Vault directory does not exist: {self.config.input_dir}")
 
         # Validate output directory
         self._validate_output_dir()
@@ -61,18 +64,18 @@ class CanonizeStage(Stage):
             raise ValueError("No transform mappings configured")
 
     def execute(self) -> StageResult:
-        """Execute canonization transforms."""
+        """Execute canonization transforms on vault data."""
         mappings = self.config.get("mappings", [])
-        input_dir = self.config.input_dir
+        vault_root = self.config.input_dir
         output_dir = self.config.output_dir
         transform_registry = Path(self.config.get("transform_registry"))
 
         self.logger.info(
-            f"Starting canonization with {len(mappings)} mappings",
+            f"Starting canonization with {len(mappings)} mappings from vault",
             extra={
                 "stage": self.name,
                 "event": "canonize_started",
-                "metadata": {"mappings_count": len(mappings)},
+                "metadata": {"mappings_count": len(mappings), "vault_root": str(vault_root)},
             },
         )
 
@@ -82,41 +85,41 @@ class CanonizeStage(Stage):
 
         # Process each mapping
         for mapping in mappings:
-            source_pattern = mapping["source_pattern"]
+            source_path = mapping["source_pattern"]  # e.g., "email/gmail"
             transform_name = mapping["transform"]
             output_name = mapping.get("output_name", "canonical")
 
-            # Find matching input files
-            input_files = list(input_dir.glob(source_pattern))
+            # Find manifests in vault matching source path
+            manifests = self._find_manifests(vault_root, source_path)
 
-            if not input_files:
+            if not manifests:
                 self.logger.warning(
-                    f"No files match pattern: {source_pattern}",
+                    f"No manifests found for source: {source_path}",
                     extra={
                         "stage": self.name,
-                        "event": "no_files_matched",
-                        "metadata": {"pattern": source_pattern},
+                        "event": "no_manifests_found",
+                        "metadata": {"source_path": source_path},
                     },
                 )
                 continue
 
             self.logger.info(
-                f"Processing {len(input_files)} files with transform: {transform_name}",
+                f"Found {len(manifests)} manifest(s) for {source_path}",
                 extra={
                     "stage": self.name,
-                    "event": "transform_started",
+                    "event": "manifests_discovered",
                     "metadata": {
-                        "transform": transform_name,
-                        "file_count": len(input_files),
+                        "source_path": source_path,
+                        "manifest_count": len(manifests),
                     },
                 },
             )
 
-            # Process each input file
-            for input_file in input_files:
+            # Process each manifest
+            for manifest_path in manifests:
                 try:
-                    records_processed = self._transform_file(
-                        input_file=input_file,
+                    records_processed = self._transform_from_manifest(
+                        manifest_path=manifest_path,
                         transform_name=transform_name,
                         transform_registry=transform_registry,
                         output_dir=output_dir,
@@ -125,26 +128,26 @@ class CanonizeStage(Stage):
 
                     total_records += records_processed
                     self.logger.info(
-                        f"Transformed {records_processed} records from {input_file.name}",
+                        f"Transformed {records_processed} records from {manifest_path.parent}",
                         extra={
                             "stage": self.name,
-                            "event": "file_transformed",
+                            "event": "manifest_transformed",
                             "metadata": {
-                                "input_file": str(input_file),
+                                "manifest": str(manifest_path),
                                 "records": records_processed,
                             },
                         },
                     )
 
                 except Exception as e:
-                    error_msg = f"Failed to transform {input_file.name}: {e}"
+                    error_msg = f"Failed to transform manifest {manifest_path}: {e}"
                     errors.append(error_msg)
                     self.logger.error(
                         error_msg,
                         extra={
                             "stage": self.name,
                             "event": "transform_error",
-                            "metadata": {"input_file": str(input_file), "error": str(e)},
+                            "metadata": {"manifest": str(manifest_path), "error": str(e)},
                         },
                     )
 
@@ -170,6 +173,7 @@ class CanonizeStage(Stage):
             metadata={
                 "transform_registry": str(transform_registry),
                 "mappings_applied": len(mappings),
+                "manifests_processed": total_records,
                 "errors": len(errors),
             },
         )
@@ -254,6 +258,218 @@ class CanonizeStage(Stage):
                     "metadata": {"file": str(output_file)},
                 },
             )
+
+        return records
+
+    def _find_manifests(self, vault_root: Path, source_path: str) -> List[Path]:
+        """
+        Find LATEST manifest.json files in vault for a given source path.
+
+        Only processes manifests pointed to by LATEST.json markers in account
+        directories. This ensures deterministic, idempotent canonization.
+
+        Args:
+            vault_root: Vault root directory
+            source_path: Source path pattern (e.g., "email/gmail")
+
+        Returns:
+            List of manifest.json file paths from LATEST runs only
+        """
+        manifests = []
+        source_dir = vault_root / source_path
+
+        if not source_dir.exists():
+            return manifests
+
+        # Find all account directories under this source
+        # e.g., vault/email/gmail/ben-mensio/, vault/email/gmail/drben/, etc.
+        for account_dir in source_dir.iterdir():
+            if not account_dir.is_dir():
+                continue
+
+            # Look for LATEST.json marker
+            latest_marker = account_dir / "LATEST.json"
+
+            if not latest_marker.exists():
+                self.logger.debug(f"No LATEST.json found in {account_dir}, skipping")
+                continue
+
+            try:
+                # Read LATEST.json to get dt and run_id
+                with open(latest_marker, "r") as f:
+                    latest_data = json.load(f)
+
+                dt = latest_data.get("dt")
+                run_id = latest_data.get("run_id")
+
+                if not dt or not run_id:
+                    self.logger.warning(f"Invalid LATEST.json in {account_dir}")
+                    continue
+
+                # Build path to manifest
+                manifest_path = account_dir / f"dt={dt}" / f"run_id={run_id}" / "manifest.json"
+
+                if not manifest_path.exists():
+                    self.logger.warning(
+                        f"LATEST points to non-existent run: {manifest_path}"
+                    )
+                    continue
+
+                manifests.append(manifest_path)
+
+                self.logger.debug(
+                    f"Found LATEST manifest for {account_dir.name}: {dt}/{run_id}"
+                )
+
+            except Exception as e:
+                self.logger.warning(
+                    f"Could not read LATEST.json in {account_dir}: {e}"
+                )
+
+        return manifests
+
+    def _transform_from_manifest(
+        self,
+        manifest_path: Path,
+        transform_name: str,
+        transform_registry: Path,
+        output_dir: Path,
+        output_name: str,
+    ) -> int:
+        """
+        Transform data from a vault manifest.
+
+        Args:
+            manifest_path: Path to manifest.json
+            transform_name: Transform name (e.g., "email/gmail_to_canonical_v1")
+            transform_registry: Transform registry directory
+            output_dir: Output directory
+            output_name: Output file base name
+
+        Returns:
+            Number of records processed
+        """
+        # Read manifest
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
+
+        run_dir = manifest_path.parent
+        parts = manifest.get("parts", [])
+
+        if not parts:
+            self.logger.warning(f"No parts found in manifest: {manifest_path}")
+            return 0
+
+        self.logger.info(
+            f"Processing {len(parts)} part(s) from manifest",
+            extra={
+                "stage": self.name,
+                "event": "manifest_parts_found",
+                "metadata": {
+                    "manifest": str(manifest_path),
+                    "parts_count": len(parts),
+                    "total_records": manifest.get("totals", {}).get("records", 0),
+                },
+            },
+        )
+
+        # Build transform metadata path
+        transform_meta = transform_registry / f"{transform_name}.meta.yaml"
+
+        if not transform_meta.exists():
+            raise FileNotFoundError(f"Transform metadata not found: {transform_meta}")
+
+        # Build output file path (per-account for idempotency)
+        # Extract account from manifest
+        account = manifest.get("account", "unknown")
+        source = manifest.get("source", "unknown").replace("/", "_")  # email/gmail → email_gmail
+
+        # Output: canonical/email_gmail/ben-mensio.jsonl
+        account_output_dir = output_dir / source
+        account_output_dir.mkdir(parents=True, exist_ok=True)
+
+        output_file = account_output_dir / f"{account}.jsonl"
+
+        # Clear existing output for this account (idempotency: rebuild from LATEST)
+        if output_file.exists():
+            self.logger.debug(f"Clearing existing canonical output: {output_file}")
+            output_file.unlink()
+
+        # Process all parts in sequence
+        total_records = 0
+
+        for part in sorted(parts, key=lambda p: p.get("seq", 0)):
+            part_path = run_dir / part["path"]
+
+            if not part_path.exists():
+                self.logger.warning(f"Part file not found: {part_path}")
+                continue
+
+            # Transform this part
+            records = self._transform_gzip_part(
+                part_path=part_path,
+                transform_meta=transform_meta,
+                output_file=output_file,
+            )
+
+            total_records += records
+
+        return total_records
+
+    def _transform_gzip_part(
+        self,
+        part_path: Path,
+        transform_meta: Path,
+        output_file: Path,
+    ) -> int:
+        """
+        Transform a single gzip-compressed JSONL part.
+
+        Args:
+            part_path: Path to part-NNN.jsonl.gz file
+            transform_meta: Transform metadata file
+            output_file: Output file path
+
+        Returns:
+            Number of records processed
+        """
+        # Build command
+        can_bin = self.config.venv_path / "bin" / "can"
+        command = [
+            str(can_bin),
+            "transform",
+            "run",
+            "--meta",
+            str(transform_meta),
+        ]
+
+        self.logger.debug(f"Transforming part: {part_path.name}")
+
+        # Decompress and stream to canonizer stdin
+        with gzip.open(part_path, "rt") as gz_file:
+            input_data = gz_file.read()
+
+        # Execute canonizer
+        result = subprocess.run(
+            command,
+            input=input_data,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            error_msg = f"Canonizer failed on {part_path.name} with exit code {result.returncode}"
+            if result.stderr:
+                error_msg += f": {result.stderr[:500]}"
+            raise RuntimeError(error_msg)
+
+        # Append output to file
+        with open(output_file, "a") as f:
+            f.write(result.stdout)
+
+        # Count records in output
+        records = result.stdout.count("\n")
 
         return records
 

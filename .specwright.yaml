@@ -1,0 +1,19 @@
+version: '0.1'
+paths:
+  specs: .specwright/specs
+  aips: .specwright/aips
+repo:
+  default_branch: main
+user:
+  default_owner: benthepsychologist
+  default_tier: C
+current:
+  spec: .specwright/specs/lorch-adapter-refactor.md
+  aip: /home/user/lorch/.specwright/aips/lorch-adapter-refactor.yaml
+
+
+
+
+
+
+

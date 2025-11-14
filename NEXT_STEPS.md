@@ -5,28 +5,38 @@ This document tracks TODOs, roadmap, and implementation priorities for the lorch
 ## 🎯 Current Status
 
 **Version:** 0.1.0
-**Status:** Production-ready orchestrator framework
+**Status:** Production-ready orchestrator with vault storage
 **Last Updated:** 2025-11-12
 
 ### ✅ Completed
 
-- [x] Pipeline orchestration framework
-- [x] CLI interface (run, status, validate, clean)
-- [x] Extract stage (Meltano integration)
-- [x] Canonize stage (canonizer integration)
-- [x] Index stage (stub implementation)
-- [x] Configuration management system
-- [x] Structured logging (JSON format, no PHI)
-- [x] Error handling with retries
-- [x] PHI security validation
-- [x] Transform registry structure
-- [x] Comprehensive documentation
+- [x] **Pipeline orchestration framework**
+- [x] **Vault storage**: Time-series with LATEST pointers
+- [x] **CLI interface**: run, extract, list, status, validate, clean
+- [x] **Granular extraction**: `lorch extract <tap>` for individual sources
+- [x] **Discovery commands**: `lorch list extractors/jobs/transforms/mappings`
+- [x] **Extract stage**: Meltano integration with chunked targets (12 extractors)
+- [x] **Canonize stage**: LATEST-only, deterministic, idempotent
+- [x] **Per-account canonical output**: `canonical/{source}/{account}.jsonl`
+- [x] **LATEST pointer system**: Failed runs don't update pointer (safety)
+- [x] **Index stage**: Stub implementation
+- [x] **Configuration management**: YAML-based with vault paths
+- [x] **Structured logging**: JSON format, no PHI
+- [x] **Error handling with retries**: Exponential backoff
+- [x] **PHI security validation**: 700/600 permissions enforced
+- [x] **Transform registry structure**
+- [x] **Manifest tracking**: Records, checksums, compression stats
+- [x] **Comprehensive documentation**
 
 ### ⚠️ Partially Complete
 
-- [ ] Transform library (only 1/4 transforms exist)
-- [ ] Vector-projector integration (stub mode only)
-- [ ] Testing infrastructure (no tests yet)
+- [ ] **Transform library**: Only 1/4 transforms exist
+  - ✅ Gmail → canonical email
+  - ❌ Exchange → canonical email
+  - ❌ Dataverse contact → canonical contact
+  - ❌ Dataverse session → canonical clinical_session
+- [ ] **Vector-projector integration**: Stub mode only (just copies files)
+- [ ] **Testing infrastructure**: No unit or integration tests yet
 
 ---
 

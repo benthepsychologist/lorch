@@ -21,7 +21,7 @@ stages:
     repo_path: /home/user/meltano-ingest
     venv_path: /home/user/meltano-ingest/.venv
     job: ingest-all-accounts  # Meltano job name
-    output_dir: /home/user/phi-data/meltano-extracts
+    output_dir: /home/user/phi-data/vault  # Vault directory for chunked targets
     retry:
       enabled: true
       max_attempts: 3
@@ -40,24 +40,24 @@ stages:
     repo_path: /home/user/canonizer
     venv_path: /home/user/canonizer/.venv
     transform_registry: /home/user/transforms
-    input_dir: /home/user/phi-data/meltano-extracts
+    input_dir: /home/user/phi-data/vault  # Vault directory with manifests
     output_dir: /home/user/phi-data/canonical
 
-    # Mapping patterns: source files → transforms
+    # Mapping patterns: vault source paths → transforms
     mappings:
-      - source_pattern: "*gmail*.jsonl"
+      - source_pattern: "email/gmail"
         transform: email/gmail_to_canonical_v1
         output_name: email
 
-      - source_pattern: "*exchange*.jsonl"
+      - source_pattern: "email/exchange"
         transform: email/exchange_to_canonical_v1
         output_name: email
 
-      - source_pattern: "*contacts*.jsonl"
+      - source_pattern: "dataverse/contacts"
         transform: contact/dataverse_contact_to_canonical_v1
         output_name: contact
 
-      - source_pattern: "*sessions*.jsonl"
+      - source_pattern: "dataverse/sessions"
         transform: clinical_session/dataverse_session_to_canonical_v1
         output_name: clinical_session
 
